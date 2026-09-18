@@ -11,6 +11,7 @@ venv/
 certs/
 *.pem
 *.key
+versions.txt
 
 # macOS
 .DS_Store

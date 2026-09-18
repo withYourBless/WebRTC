@@ -1,25 +1,13 @@
-// =========================================================
-// DOM
-// =========================================================
-const statsInfo =
-    document.getElementById("statsInfo");
+const joinButton =
+    document.getElementById("joinButton");
 
-let statsTimer = null;
+const leaveButton =
+    document.getElementById("leaveButton");
 
-let previousBytesSent = 0;
-let previousBytesReceived = 0;
-let previousTimestamp = 0;
+const roomInput =
+    document.getElementById("roomInput");
 
-const iceInfo =
-    document.getElementById("iceInfo");
-
-const connectButton =
-    document.getElementById("connect");
-
-const disconnectButton =
-    document.getElementById("disconnect");
-
-const status =
+const statusElement =
     document.getElementById("status");
 
 const localVideo =
@@ -28,654 +16,798 @@ const localVideo =
 const remoteVideo =
     document.getElementById("remoteVideo");
 
-const effectSelect =
-    document.getElementById("effect");
+const debugElement =
+    document.getElementById("debug");
 
 
-// =========================================================
-// STATE
-// =========================================================
+let ws = null;
 
 let pc = null;
+
 let localStream = null;
-let peerId = null;
-let dataChannel = null;
+
+let myPeerId = null;
+
+let remotePeerId = null;
 
 
-// =========================================================
-// CONNECT
-// =========================================================
+// ICE candidates могут прийти раньше,
+// чем мы установим remoteDescription.
+//
+// Поэтому временно складываем их сюда.
 
-connectButton.onclick = async () => {
+let pendingIceCandidates = [];
 
-    console.log("Connecting...");
 
-    connectButton.disabled = true;
-    disconnectButton.disabled = true;
-    effectSelect.disabled = true;
+// ============================================================
+// DEBUG
+// ============================================================
 
-    status.textContent = "connecting";
+function log(...args) {
 
+    console.log(...args);
+
+    debugElement.textContent +=
+        args.join(" ") + "\n";
+}
+
+
+// ============================================================
+// CREATE PEER CONNECTION
+// ============================================================
+
+function createPeerConnection() {
+
+    log("Creating RTCPeerConnection");
+
+
+    pc = new RTCPeerConnection({
+
+        iceServers: [
+
+            {
+                urls:
+                    "stun:stun.l.google.com:19302"
+            }
+
+        ]
+
+    });
+
+
+    // --------------------------------------------------------
+    // LOCAL ICE CANDIDATE
+    // --------------------------------------------------------
+
+    pc.onicecandidate = (event) => {
+
+        if (!event.candidate) {
+
+            log("ICE gathering finished");
+
+            return;
+        }
+
+
+        log(
+            "Local ICE candidate:",
+            event.candidate.type
+        );
+
+
+        if (!remotePeerId) {
+
+            log(
+                "Remote peer is not known yet"
+            );
+
+            return;
+        }
+
+
+        ws.send(JSON.stringify({
+
+            type:
+                "ice-candidate",
+
+            target:
+                remotePeerId,
+
+            candidate:
+                event.candidate
+
+        }));
+
+    };
+
+
+    // --------------------------------------------------------
+    // REMOTE VIDEO
+    // --------------------------------------------------------
+
+    pc.ontrack = (event) => {
+
+        log(
+            "Remote track:",
+            event.track.kind
+        );
+
+
+        if (event.streams.length > 0) {
+
+            remoteVideo.srcObject =
+                event.streams[0];
+
+        } else {
+
+            remoteVideo.srcObject =
+                new MediaStream([
+                    event.track
+                ]);
+
+        }
+
+    };
+
+
+    // --------------------------------------------------------
+    // CONNECTION STATE
+    // --------------------------------------------------------
+
+    pc.onconnectionstatechange = () => {
+
+        log(
+            "Connection state:",
+            pc.connectionState
+        );
+
+
+        statusElement.textContent =
+            pc.connectionState;
+
+    };
+
+
+    // --------------------------------------------------------
+    // ICE STATE
+    // --------------------------------------------------------
+
+    pc.oniceconnectionstatechange = () => {
+
+        log(
+            "ICE state:",
+            pc.iceConnectionState
+        );
+
+    };
+
+
+    // --------------------------------------------------------
+    // ADD LOCAL TRACKS
+    // --------------------------------------------------------
+
+    for (
+        const track
+        of localStream.getTracks()
+    ) {
+
+        pc.addTrack(
+            track,
+            localStream
+        );
+
+    }
+
+}
+
+
+// ============================================================
+// CREATE OFFER
+// ============================================================
+
+async function createOffer(
+    targetPeerId
+) {
+
+    log(
+        "Creating offer for:",
+        targetPeerId
+    );
+
+
+    remotePeerId =
+        targetPeerId;
+
+
+    const offer =
+        await pc.createOffer();
+
+
+    await pc.setLocalDescription(
+        offer
+    );
+
+
+    ws.send(JSON.stringify({
+
+        type:
+            "offer",
+
+        target:
+            remotePeerId,
+
+        sdp:
+            pc.localDescription
+
+    }));
+
+
+    log("Offer sent");
+
+}
+
+
+// ============================================================
+// HANDLE OFFER
+// ============================================================
+
+async function handleOffer(data) {
+
+    log(
+        "Offer received from:",
+        data.from
+    );
+
+
+    remotePeerId =
+        data.from;
+
+
+    await pc.setRemoteDescription(
+        data.sdp
+    );
+
+
+    await flushPendingIceCandidates();
+
+
+    const answer =
+        await pc.createAnswer();
+
+
+    await pc.setLocalDescription(
+        answer
+    );
+
+
+    ws.send(JSON.stringify({
+
+        type:
+            "answer",
+
+        target:
+            remotePeerId,
+
+        sdp:
+            pc.localDescription
+
+    }));
+
+
+    log("Answer sent");
+
+}
+
+
+// ============================================================
+// HANDLE ANSWER
+// ============================================================
+
+async function handleAnswer(data) {
+
+    log(
+        "Answer received from:",
+        data.from
+    );
+
+
+    await pc.setRemoteDescription(
+        data.sdp
+    );
+
+
+    await flushPendingIceCandidates();
+
+
+    log(
+        "Remote description installed"
+    );
+
+}
+
+
+// ============================================================
+// HANDLE ICE
+// ============================================================
+
+async function handleIceCandidate(
+    data
+) {
+
+    if (!data.candidate) {
+        return;
+    }
+
+
+    const candidate =
+        new RTCIceCandidate(
+            data.candidate
+        );
+
+
+    // Если SDP второго peer ещё
+    // не установлен — candidate пока
+    // нельзя безопасно добавить.
+
+    if (
+        !pc.remoteDescription
+    ) {
+
+        log(
+            "Queue remote ICE candidate"
+        );
+
+
+        pendingIceCandidates.push(
+            candidate
+        );
+
+
+        return;
+    }
+
+
+    await pc.addIceCandidate(
+        candidate
+    );
+
+
+    log(
+        "Remote ICE candidate added"
+    );
+
+}
+
+
+// ============================================================
+// FLUSH ICE QUEUE
+// ============================================================
+
+async function flushPendingIceCandidates() {
+
+    log(
+        "Flushing ICE candidates:",
+        pendingIceCandidates.length
+    );
+
+
+    for (
+        const candidate
+        of pendingIceCandidates
+    ) {
+
+        await pc.addIceCandidate(
+            candidate
+        );
+
+    }
+
+
+    pendingIceCandidates = [];
+
+}
+
+
+// ============================================================
+// WEBSOCKET MESSAGE
+// ============================================================
+
+async function handleWebSocketMessage(
+    event
+) {
+
+    const data =
+        JSON.parse(event.data);
+
+
+    log(
+        "WS message:",
+        data.type
+    );
+
+
+    // --------------------------------------------------------
+    // JOINED
+    // --------------------------------------------------------
+
+    if (data.type === "joined") {
+
+        myPeerId =
+            data.peer_id;
+
+
+        log(
+            "My peer ID:",
+            myPeerId
+        );
+
+
+        log(
+            "Peers already in room:",
+            data.peers.length
+        );
+
+
+        // Если кто-то уже находится
+        // в комнате — МЫ создаём offer.
+
+        if (data.peers.length > 0) {
+
+            await createOffer(
+                data.peers[0]
+            );
+
+        }
+
+    }
+
+
+    // --------------------------------------------------------
+    // PEER JOINED
+    // --------------------------------------------------------
+
+    else if (
+        data.type === "peer-joined"
+    ) {
+
+        log(
+            "New peer joined:",
+            data.peer_id
+        );
+
+
+        // Ничего не делаем.
+        //
+        // Новый peer сам создаст offer.
+    }
+
+
+    // --------------------------------------------------------
+    // OFFER
+    // --------------------------------------------------------
+
+    else if (
+        data.type === "offer"
+    ) {
+
+        await handleOffer(
+            data
+        );
+
+    }
+
+
+    // --------------------------------------------------------
+    // ANSWER
+    // --------------------------------------------------------
+
+    else if (
+        data.type === "answer"
+    ) {
+
+        await handleAnswer(
+            data
+        );
+
+    }
+
+
+    // --------------------------------------------------------
+    // ICE
+    // --------------------------------------------------------
+
+    else if (
+        data.type ===
+        "ice-candidate"
+    ) {
+
+        await handleIceCandidate(
+            data
+        );
+
+    }
+
+
+    // --------------------------------------------------------
+    // PEER LEFT
+    // --------------------------------------------------------
+
+    else if (
+        data.type === "peer-left"
+    ) {
+
+        log(
+            "Peer left:",
+            data.peer_id
+        );
+
+
+        remotePeerId = null;
+
+
+        remoteVideo.srcObject =
+            null;
+
+
+        if (pc) {
+
+            pc.close();
+
+            pc = null;
+
+        }
+
+
+        // Мы остаёмся в комнате.
+        //
+        // Создаём новый RTCPeerConnection,
+        // чтобы другой человек мог
+        // подключиться позже.
+
+        createPeerConnection();
+
+
+        statusElement.textContent =
+            "waiting";
+
+    }
+
+
+    // --------------------------------------------------------
+    // ERROR
+    // --------------------------------------------------------
+
+    else if (
+        data.type === "error"
+    ) {
+
+        log(
+            "Server error:",
+            data.message
+        );
+
+    }
+
+}
+
+
+// ============================================================
+// JOIN ROOM
+// ============================================================
+
+joinButton.onclick =
+async () => {
 
     try {
 
-        // -------------------------------------------------
-        // 1. CAMERA
-        // -------------------------------------------------
+        joinButton.disabled =
+            true;
+
+
+        roomInput.disabled =
+            true;
+
+
+        debugElement.textContent =
+            "";
+
+
+        statusElement.textContent =
+            "requesting camera";
+
+
+        // ----------------------------------------------------
+        // CAMERA
+        // ----------------------------------------------------
 
         localStream =
-            await navigator.mediaDevices.getUserMedia({
-                video: true,
-                audio: false
-            });
+            await navigator.mediaDevices
+                .getUserMedia({
 
+                    video:
+                        true,
 
-        console.log(
-            "Camera received"
-        );
+                    audio:
+                        false
+
+                });
 
 
         localVideo.srcObject =
             localStream;
 
 
-        // -------------------------------------------------
-        // 2. PEER CONNECTION
-        // -------------------------------------------------
-
-        pc = new RTCPeerConnection({
-            iceServers: [
-                {
-                    urls: "turn:192.168.1.109:3478?transport=udp",
-                    username: "webrtc",
-                    credential: "test123456"
-                }
-            ],
-
-            iceTransportPolicy: "relay"
-        });
+        log("Camera started");
 
 
-        console.log(
-            "RTCPeerConnection created"
+        // ----------------------------------------------------
+        // RTCPeerConnection
+        // ----------------------------------------------------
+
+        createPeerConnection();
+
+
+        // ----------------------------------------------------
+        // WEBSOCKET
+        // ----------------------------------------------------
+
+        const protocol =
+
+            location.protocol === "https:"
+
+                ? "wss:"
+
+                : "ws:";
+
+
+        const wsUrl =
+            `${protocol}//${location.host}/ws`;
+
+
+        log(
+            "Connecting WebSocket:",
+            wsUrl
         );
 
 
-        // -------------------------------------------------
-        // 3. ICE CANDIDATES
-        // -------------------------------------------------
-
-        pc.onicecandidate = (event) => {
-
-            if (event.candidate) {
-
-                console.log(
-                    "ICE candidate:",
-                    event.candidate.candidate
-                );
-
-            } else {
-
-                console.log(
-                    "ICE gathering finished"
-                );
-            }
-        };
-
-
-        // -------------------------------------------------
-        // 4. ICE CONNECTION STATE
-        // -------------------------------------------------
-
-        pc.oniceconnectionstatechange = () => {
-
-            console.log(
-                "ICE state:",
-                pc.iceConnectionState
-            );
-        };
-
-
-        // -------------------------------------------------
-        // 5. DATA CHANNEL
-        // -------------------------------------------------
-
-        dataChannel =
-            pc.createDataChannel(
-                "control"
+        ws =
+            new WebSocket(
+                wsUrl
             );
 
 
-        console.log(
-            "DataChannel created"
-        );
+        ws.onopen = () => {
 
-
-        dataChannel.onopen = () => {
-
-            console.log(
-                "DataChannel opened"
+            log(
+                "WebSocket connected"
             );
 
 
-            effectSelect.disabled =
+            statusElement.textContent =
+                "waiting";
+
+
+            leaveButton.disabled =
                 false;
-        };
 
 
-        dataChannel.onclose = () => {
+            ws.send(
+                JSON.stringify({
 
-            console.log(
-                "DataChannel closed"
+                    type:
+                        "join",
+
+                    room:
+                        roomInput.value
+
+                })
             );
 
-
-            effectSelect.disabled =
-                true;
         };
 
 
-        dataChannel.onerror = (error) => {
+        ws.onmessage =
+            handleWebSocketMessage;
+
+
+        ws.onerror = (
+            error
+        ) => {
 
             console.error(
-                "DataChannel error:",
+                "WebSocket error:",
                 error
             );
+
+
+            log(
+                "WebSocket error"
+            );
+
         };
 
 
-        dataChannel.onmessage = (event) => {
+        ws.onclose = () => {
 
-            console.log(
-                "Message from Python:",
-                event.data
+            log(
+                "WebSocket closed"
             );
 
-
-            try {
-
-                const message =
-                    JSON.parse(
-                        event.data
-                    );
-
-
-                console.log(
-                    "Parsed message:",
-                    message
-                );
-
-            } catch {
-
-                console.log(
-                    "Text message:",
-                    event.data
-                );
-            }
         };
-
-
-        // -------------------------------------------------
-        // 6. CONNECTION STATE
-        // -------------------------------------------------
-
-        pc.onconnectionstatechange =
-            async () => {
-
-                console.log(
-                    "Connection:",
-                    pc.connectionState
-                );
-
-
-                status.textContent =
-                    pc.connectionState;
-
-
-                if (
-                    pc.connectionState ===
-                    "connected"
-                ) {
-
-                    disconnectButton.disabled =
-                        false;
-
-
-                    // ICE уже выбрал рабочий маршрут.
-                    // Посмотрим его через getStats().
-                    await printSelectedCandidatePair();
-
-                    if (!statsTimer) {
-                        statsTimer =
-                            setInterval(
-                                updateWebRTCStats,
-                                1000
-                            );
-                    }
-                }
-
-
-                if (
-                    pc.connectionState ===
-                    "failed"
-                ) {
-
-                    await disconnect();
-                }
-            };
-
-
-        // -------------------------------------------------
-        // 7. REMOTE VIDEO
-        // -------------------------------------------------
-
-        pc.ontrack = (event) => {
-
-            console.log(
-                "Remote track:",
-                event.track.kind
-            );
-
-
-            if (
-                event.streams.length > 0
-            ) {
-
-                remoteVideo.srcObject =
-                    event.streams[0];
-
-            } else {
-
-                remoteVideo.srcObject =
-                    new MediaStream([
-                        event.track
-                    ]);
-            }
-        };
-
-
-        // -------------------------------------------------
-        // 8. LOCAL VIDEO TRACK
-        // -------------------------------------------------
-
-        for (
-            const track
-            of localStream.getTracks()
-        ) {
-
-            console.log(
-                "Adding local track:",
-                track.kind
-            );
-
-
-            pc.addTrack(
-                track,
-                localStream
-            );
-        }
-
-
-        // -------------------------------------------------
-        // 9. SDP OFFER
-        // -------------------------------------------------
-
-        const offer =
-            await pc.createOffer();
-
-
-        await pc.setLocalDescription(
-            offer
-        );
-
-
-        console.log(
-            "========== LOCAL SDP =========="
-        );
-
-
-        console.log(
-            pc.localDescription.sdp
-        );
-
-
-        // -------------------------------------------------
-        // 10. SIGNALING
-        // -------------------------------------------------
-
-        const response =
-            await fetch(
-                "/offer",
-                {
-
-                    method: "POST",
-
-                    headers: {
-                        "Content-Type":
-                            "application/json"
-                    },
-
-                    body: JSON.stringify({
-
-                        sdp:
-                            pc.localDescription.sdp,
-
-                        type:
-                            pc.localDescription.type
-                    })
-                }
-            );
-
-
-        if (!response.ok) {
-
-            throw new Error(
-                `Offer failed: HTTP ${
-                    response.status
-                }`
-            );
-        }
-
-
-        // -------------------------------------------------
-        // 11. SDP ANSWER
-        // -------------------------------------------------
-
-        const answer =
-            await response.json();
-
-
-        peerId =
-            answer.peer_id;
-
-
-        console.log(
-            "Peer ID:",
-            peerId
-        );
-
-
-        console.log(
-            "========== REMOTE SDP =========="
-        );
-
-
-        console.log(
-            answer.sdp
-        );
-
-
-        // -------------------------------------------------
-        // 12. SET REMOTE DESCRIPTION
-        // -------------------------------------------------
-
-        await pc.setRemoteDescription({
-
-            sdp:
-                answer.sdp,
-
-            type:
-                answer.type
-        });
-
-
-        console.log(
-            "Remote description set"
-        );
 
 
     } catch (error) {
 
         console.error(
-            "Connection error:",
             error
         );
 
 
-        status.textContent =
+        log(
+            "ERROR:",
+            error.message
+        );
+
+
+        statusElement.textContent =
             "error";
 
 
-        await disconnect();
+        await leaveRoom();
+
     }
+
 };
 
 
-// =========================================================
-// SELECTED ICE CANDIDATE PAIR
-// =========================================================
+// ============================================================
+// LEAVE ROOM
+// ============================================================
 
-async function printSelectedCandidatePair() {
+leaveButton.onclick =
+async () => {
 
-    if (!pc) {
-        return;
-    }
+    await leaveRoom();
 
-    try {
-        const stats = await pc.getStats();
-
-        let text = "";
-
-        // ==========================================
-        // ALL LOCAL CANDIDATES
-        // ==========================================
-
-        text += "ALL LOCAL CANDIDATES\n\n";
-
-        for (const report of stats.values()) {
-
-            if (report.type === "local-candidate") {
-
-                text +=
-`type:     ${report.candidateType}
-address:  ${report.address ?? report.ip ?? "hidden"}
-port:     ${report.port}
-protocol: ${report.protocol}
-
-`;
-            }
-        }
-
-
-        // ==========================================
-        // ALL REMOTE CANDIDATES
-        // ==========================================
-
-        text += "\nALL REMOTE CANDIDATES\n\n";
-
-        for (const report of stats.values()) {
-
-            if (report.type === "remote-candidate") {
-
-                text +=
-`type:     ${report.candidateType}
-address:  ${report.address ?? report.ip ?? "hidden"}
-port:     ${report.port}
-protocol: ${report.protocol}
-
-`;
-            }
-        }
-
-
-        // ==========================================
-        // SELECTED PAIR
-        // ==========================================
-
-        text += "\nSELECTED ICE PAIR\n\n";
-
-
-        for (const report of stats.values()) {
-
-            if (
-                report.type === "candidate-pair"
-                &&
-                report.state === "succeeded"
-                &&
-                report.nominated
-            ) {
-
-                const localCandidate =
-                    stats.get(
-                        report.localCandidateId
-                    );
-
-                const remoteCandidate =
-                    stats.get(
-                        report.remoteCandidateId
-                    );
-
-
-                text +=
-`LOCAL
-type:     ${localCandidate?.candidateType}
-address:  ${localCandidate?.address ?? localCandidate?.ip ?? "hidden"}
-port:     ${localCandidate?.port}
-protocol: ${localCandidate?.protocol}
-
-REMOTE
-type:     ${remoteCandidate?.candidateType}
-address:  ${remoteCandidate?.address ?? remoteCandidate?.ip ?? "hidden"}
-port:     ${remoteCandidate?.port}
-protocol: ${remoteCandidate?.protocol}
-
-PAIR
-state:     ${report.state}
-nominated: ${report.nominated}
-`;
-            }
-        }
-
-
-        iceInfo.textContent = text;
-
-
-    } catch (error) {
-
-        console.error(
-            "getStats error:",
-            error
-        );
-
-        iceInfo.textContent =
-            `Stats error: ${error}`;
-    }
-}
-
-
-// =========================================================
-// EFFECT CHANGE
-// =========================================================
-
-effectSelect.onchange = () => {
-
-    const effect =
-        effectSelect.value;
-
-
-    if (!dataChannel) {
-
-        console.warn(
-            "DataChannel does not exist"
-        );
-
-        return;
-    }
-
-
-    if (
-        dataChannel.readyState !==
-        "open"
-    ) {
-
-        console.warn(
-            "DataChannel is not open"
-        );
-
-        return;
-    }
-
-
-    const message = {
-
-        type:
-            "effect",
-
-        value:
-            effect
-    };
-
-
-    console.log(
-        "Sending DataChannel message:",
-        message
-    );
-
-
-    dataChannel.send(
-        JSON.stringify(
-            message
-        )
-    );
 };
 
 
-// =========================================================
-// DISCONNECT BUTTON
-// =========================================================
+async function leaveRoom() {
 
-disconnectButton.onclick =
-    async () => {
-
-        await disconnect();
-    };
-
-
-// =========================================================
-// DISCONNECT
-// =========================================================
-
-async function disconnect() {
-
-    console.log(
-        "Disconnecting..."
+    log(
+        "Leaving room"
     );
 
-    iceInfo.textContent =
-    "Waiting for connection...";
 
+    // --------------------------------------------------------
+    // WEBSOCKET
+    // --------------------------------------------------------
 
-    // Сохраняем ID перед очисткой состояния.
-    const id =
-        peerId;
+    if (ws) {
 
+        ws.close();
 
-    peerId =
-        null;
+        ws = null;
 
-
-    // -----------------------------------------------------
-    // 1. DATA CHANNEL
-    // -----------------------------------------------------
-
-    if (dataChannel) {
-
-        console.log(
-            "Closing DataChannel"
-        );
-
-
-        dataChannel.close();
-
-
-        dataChannel =
-            null;
     }
 
 
-    // -----------------------------------------------------
-    // 2. CAMERA
-    // -----------------------------------------------------
+    // --------------------------------------------------------
+    // WEBRTC
+    // --------------------------------------------------------
+
+    if (pc) {
+
+        pc.close();
+
+        pc = null;
+
+    }
+
+
+    // --------------------------------------------------------
+    // CAMERA
+    // --------------------------------------------------------
 
     if (localStream) {
 
@@ -684,56 +816,19 @@ async function disconnect() {
             of localStream.getTracks()
         ) {
 
-            console.log(
-                "Stopping track:",
-                track.kind
-            );
-
-
             track.stop();
+
         }
 
 
-        localStream =
-            null;
+        localStream = null;
+
     }
 
 
-    // -----------------------------------------------------
-    // 3. PEER CONNECTION
-    // -----------------------------------------------------
-
-    if (pc) {
-
-        console.log(
-            "Closing RTCPeerConnection"
-        );
-
-
-        pc.ontrack =
-            null;
-
-        pc.onconnectionstatechange =
-            null;
-
-        pc.onicecandidate =
-            null;
-
-        pc.oniceconnectionstatechange =
-            null;
-
-
-        pc.close();
-
-
-        pc =
-            null;
-    }
-
-
-    // -----------------------------------------------------
-    // 4. VIDEO
-    // -----------------------------------------------------
+    // --------------------------------------------------------
+    // RESET
+    // --------------------------------------------------------
 
     localVideo.srcObject =
         null;
@@ -743,281 +838,31 @@ async function disconnect() {
         null;
 
 
-    // -----------------------------------------------------
-    // 5. UI
-    // -----------------------------------------------------
+    myPeerId =
+        null;
 
-    status.textContent =
+
+    remotePeerId =
+        null;
+
+
+    pendingIceCandidates =
+        [];
+
+
+    statusElement.textContent =
         "disconnected";
 
 
-    connectButton.disabled =
+    joinButton.disabled =
         false;
 
 
-    disconnectButton.disabled =
+    leaveButton.disabled =
         true;
 
 
-    effectSelect.disabled =
-        true;
+    roomInput.disabled =
+        false;
 
-
-    effectSelect.value =
-        "original";
-
-
-    // -----------------------------------------------------
-    // 6. NOTIFY PYTHON
-    // -----------------------------------------------------
-
-    if (id) {
-
-        try {
-
-            const response =
-                await fetch(
-                    `/peers/${id}/close`,
-                    {
-                        method:
-                            "POST"
-                    }
-                );
-
-
-            console.log(
-                "Server close status:",
-                response.status
-            );
-
-
-        } catch (error) {
-
-            console.error(
-                "Failed to notify server:",
-                error
-            );
-        }
-    }
-
-    if (statsTimer) {
-
-        clearInterval(
-            statsTimer
-        );
-
-        statsTimer =
-            null;
-    }
-
-
-    previousBytesSent = 0;
-    previousBytesReceived = 0;
-    previousTimestamp = 0;
-
-
-    statsInfo.textContent =
-        "Waiting for connection...";
-
-
-    console.log(
-        "Disconnected"
-    );
-}
-
-
-async function updateWebRTCStats() {
-
-    if (!pc) {
-        return;
-    }
-
-    const stats =
-        await pc.getStats();
-
-    let selectedPair = null;
-
-    let bytesSent = 0;
-    let bytesReceived = 0;
-
-    let packetsSent = 0;
-    let packetsReceived = 0;
-
-    let packetsLost = 0;
-    let jitter = 0;
-
-
-    for (const report of stats.values()) {
-
-        // -----------------------------------------
-        // SELECTED ICE PAIR
-        // -----------------------------------------
-
-        if (
-            report.type === "candidate-pair"
-            &&
-            report.state === "succeeded"
-            &&
-            report.nominated
-        ) {
-            selectedPair = report;
-        }
-
-
-        // -----------------------------------------
-        // OUTBOUND VIDEO
-        // -----------------------------------------
-
-        if (
-            report.type === "outbound-rtp"
-            &&
-            report.kind === "video"
-        ) {
-
-            bytesSent +=
-                report.bytesSent || 0;
-
-            packetsSent +=
-                report.packetsSent || 0;
-        }
-
-
-        // -----------------------------------------
-        // INBOUND VIDEO
-        // -----------------------------------------
-
-        if (
-            report.type === "inbound-rtp"
-            &&
-            report.kind === "video"
-        ) {
-
-            bytesReceived +=
-                report.bytesReceived || 0;
-
-            packetsReceived +=
-                report.packetsReceived || 0;
-
-            packetsLost +=
-                report.packetsLost || 0;
-
-            jitter =
-                report.jitter || 0;
-        }
-    }
-
-
-    // ---------------------------------------------
-    // BITRATE
-    // ---------------------------------------------
-
-    const now =
-        performance.now();
-
-
-    let uploadBitrate = 0;
-    let downloadBitrate = 0;
-
-
-    if (previousTimestamp !== 0) {
-
-        const seconds =
-            (now - previousTimestamp)
-            / 1000;
-
-
-        uploadBitrate =
-            (
-                (bytesSent - previousBytesSent)
-                * 8
-                / seconds
-                / 1000
-            );
-
-
-        downloadBitrate =
-            (
-                (bytesReceived - previousBytesReceived)
-                * 8
-                / seconds
-                / 1000
-            );
-    }
-
-
-    previousBytesSent =
-        bytesSent;
-
-    previousBytesReceived =
-        bytesReceived;
-
-    previousTimestamp =
-        now;
-
-
-    // ---------------------------------------------
-    // RTT
-    // ---------------------------------------------
-
-    let rtt = null;
-
-
-    if (
-        selectedPair
-        &&
-        selectedPair.currentRoundTripTime
-            !== undefined
-    ) {
-
-        rtt =
-            selectedPair.currentRoundTripTime
-            * 1000;
-    }
-
-
-    // ---------------------------------------------
-    // UI
-    // ---------------------------------------------
-
-    statsInfo.textContent =
-`VIDEO
-
-Upload bitrate:
-${uploadBitrate.toFixed(0)} kbps
-
-Download bitrate:
-${downloadBitrate.toFixed(0)} kbps
-
-
-TRAFFIC
-
-Sent:
-${(bytesSent / 1024 / 1024).toFixed(2)} MB
-
-Received:
-${(bytesReceived / 1024 / 1024).toFixed(2)} MB
-
-
-PACKETS
-
-Sent:
-${packetsSent}
-
-Received:
-${packetsReceived}
-
-Lost:
-${packetsLost}
-
-
-NETWORK
-
-RTT:
-${rtt !== null
-    ? rtt.toFixed(1) + " ms"
-    : "unknown"}
-
-Jitter:
-${(jitter * 1000).toFixed(1)} ms
-`;
 }
