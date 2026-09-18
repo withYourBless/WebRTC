@@ -115,10 +115,36 @@
 
 </div>
 
+<h3>WebRTC Chat</h3>
+
+<div class="controls">
+
+    <input
+        id="messageInput"
+        placeholder="Message"
+        disabled
+    >
+
+    <button
+        id="sendButton"
+        disabled
+    >
+        Send
+    </button>
+
+</div>
+
+<pre id="chatMessages">Waiting for DataChannel...</pre>
 
 <h3>Debug</h3>
 
 <pre id="debug"></pre>
+
+<h3>ICE connection</h3>
+<pre id="iceInfo">Waiting for connection...</pre>
+
+<h3>WebRTC statistics</h3>
+<pre id="statsInfo">Waiting for connection...</pre>
 
 
 <script src="/static/client.js"></script>

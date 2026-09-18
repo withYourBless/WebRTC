@@ -1,3 +1,18 @@
+const messageInput =
+    document.getElementById("messageInput");
+
+const sendButton =
+    document.getElementById("sendButton");
+
+const chatMessages =
+    document.getElementById("chatMessages");
+
+const iceInfo =
+    document.getElementById("iceInfo");
+
+const statsInfo =
+    document.getElementById("statsInfo");
+
 const joinButton =
     document.getElementById("joinButton");
 
@@ -19,6 +34,7 @@ const remoteVideo =
 const debugElement =
     document.getElementById("debug");
 
+let dataChannel = null;
 
 let ws = null;
 
@@ -29,6 +45,12 @@ let localStream = null;
 let myPeerId = null;
 
 let remotePeerId = null;
+
+let statsTimer = null;
+
+let previousBytesSent = 0;
+let previousBytesReceived = 0;
+let previousTimestamp = 0;
 
 
 // ICE candidates могут прийти раньше,
@@ -62,17 +84,27 @@ function createPeerConnection() {
 
 
     pc = new RTCPeerConnection({
-
         iceServers: [
-
             {
-                urls:
-                    "stun:stun.l.google.com:19302"
+                urls: "stun:stun.l.google.com:19302"
+            },
+            {
+                urls: "turn:192.168.1.109:3478?transport=udp",
+                username: "webrtc",
+                credential: "test123456"
             }
-
         ]
-
     });
+
+    pc.ondatachannel = (event) => {
+        log(
+            "Remote DataChannel received:",
+            event.channel.label
+        );
+        setupDataChannel(
+            event.channel
+        );
+    };
 
 
     // --------------------------------------------------------
@@ -154,7 +186,7 @@ function createPeerConnection() {
     // CONNECTION STATE
     // --------------------------------------------------------
 
-    pc.onconnectionstatechange = () => {
+    pc.onconnectionstatechange = async () => {
 
         log(
             "Connection state:",
@@ -164,6 +196,30 @@ function createPeerConnection() {
 
         statusElement.textContent =
             pc.connectionState;
+
+
+        if (
+            pc.connectionState === "connected"
+        ) {
+
+            // Сразу показываем ICE route.
+
+            await updateIceInfo();
+
+
+            // Запускаем realtime stats.
+
+            if (!statsTimer) {
+
+                statsTimer =
+                    setInterval(
+                        updateWebRTCStats,
+                        1000
+                    );
+
+            }
+
+        }
 
     };
 
@@ -217,6 +273,15 @@ async function createOffer(
 
     remotePeerId =
         targetPeerId;
+
+    const channel =
+        pc.createDataChannel(
+            "chat"
+        );
+
+    setupDataChannel(
+        channel
+    );
 
 
     const offer =
@@ -564,6 +629,25 @@ async function handleWebSocketMessage(
         // чтобы другой человек мог
         // подключиться позже.
 
+        if (statsTimer) {
+            clearInterval(
+                statsTimer
+            );
+            statsTimer = null;
+        }
+
+
+        previousBytesSent = 0;
+        previousBytesReceived = 0;
+        previousTimestamp = 0;
+
+
+        iceInfo.textContent =
+            "Waiting for peer...";
+
+        statsInfo.textContent =
+            "Waiting for peer...";
+
         createPeerConnection();
 
 
@@ -778,6 +862,27 @@ async function leaveRoom() {
         "Leaving room"
     );
 
+    if (statsTimer) {
+
+        clearInterval(
+            statsTimer
+        );
+
+        statsTimer = null;
+    }
+
+
+    previousBytesSent = 0;
+    previousBytesReceived = 0;
+    previousTimestamp = 0;
+
+
+    iceInfo.textContent =
+        "Waiting for connection...";
+
+    statsInfo.textContent =
+        "Waiting for connection...";
+
 
     // --------------------------------------------------------
     // WEBSOCKET
@@ -795,6 +900,11 @@ async function leaveRoom() {
     // --------------------------------------------------------
     // WEBRTC
     // --------------------------------------------------------
+
+    if (dataChannel) {
+        dataChannel.close();
+        dataChannel = null;
+    }
 
     if (pc) {
 
@@ -864,5 +974,474 @@ async function leaveRoom() {
 
     roomInput.disabled =
         false;
+
+}
+
+async function updateIceInfo() {
+
+    if (!pc) {
+        return;
+    }
+
+    try {
+
+        const stats =
+            await pc.getStats();
+
+
+        let selectedPair = null;
+
+
+        // Ищем выбранную candidate pair.
+
+        for (const report of stats.values()) {
+
+            if (
+                report.type === "candidate-pair" &&
+                report.state === "succeeded" &&
+                report.nominated
+            ) {
+
+                selectedPair = report;
+
+                break;
+            }
+        }
+
+
+        if (!selectedPair) {
+
+            iceInfo.textContent =
+                "Selected ICE pair not found yet";
+
+            return;
+        }
+
+
+        const localCandidate =
+            stats.get(
+                selectedPair.localCandidateId
+            );
+
+
+        const remoteCandidate =
+            stats.get(
+                selectedPair.remoteCandidateId
+            );
+
+
+        iceInfo.textContent =
+`SELECTED ICE PAIR
+
+LOCAL
+
+type:     ${localCandidate?.candidateType ?? "unknown"}
+address:  ${localCandidate?.address ?? localCandidate?.ip ?? "hidden"}
+port:     ${localCandidate?.port ?? "unknown"}
+protocol: ${localCandidate?.protocol ?? "unknown"}
+
+
+REMOTE
+
+type:     ${remoteCandidate?.candidateType ?? "unknown"}
+address:  ${remoteCandidate?.address ?? remoteCandidate?.ip ?? "hidden"}
+port:     ${remoteCandidate?.port ?? "unknown"}
+protocol: ${remoteCandidate?.protocol ?? "unknown"}
+
+
+PAIR
+
+state:     ${selectedPair.state}
+nominated: ${selectedPair.nominated}
+`;
+
+    } catch (error) {
+
+        console.error(
+            "ICE stats error:",
+            error
+        );
+
+        iceInfo.textContent =
+            `ICE stats error: ${error.message}`;
+    }
+
+}
+
+
+async function updateWebRTCStats() {
+
+    if (!pc) {
+        return;
+    }
+
+
+    try {
+
+        const stats =
+            await pc.getStats();
+
+
+        let selectedPair = null;
+
+        let bytesSent = 0;
+        let bytesReceived = 0;
+
+        let packetsSent = 0;
+        let packetsReceived = 0;
+        let packetsLost = 0;
+
+        let jitter = 0;
+
+
+        for (const report of stats.values()) {
+
+
+            // --------------------------------------------
+            // ICE candidate pair
+            // --------------------------------------------
+
+            if (
+                report.type === "candidate-pair" &&
+                report.state === "succeeded" &&
+                report.nominated
+            ) {
+
+                selectedPair =
+                    report;
+            }
+
+
+            // --------------------------------------------
+            // VIDEO WE SEND
+            // --------------------------------------------
+
+            if (
+                report.type === "outbound-rtp" &&
+                report.kind === "video"
+            ) {
+
+                bytesSent +=
+                    report.bytesSent || 0;
+
+                packetsSent +=
+                    report.packetsSent || 0;
+            }
+
+
+            // --------------------------------------------
+            // VIDEO WE RECEIVE
+            // --------------------------------------------
+
+            if (
+                report.type === "inbound-rtp" &&
+                report.kind === "video"
+            ) {
+
+                bytesReceived +=
+                    report.bytesReceived || 0;
+
+                packetsReceived +=
+                    report.packetsReceived || 0;
+
+                packetsLost +=
+                    report.packetsLost || 0;
+
+                jitter =
+                    report.jitter || 0;
+            }
+
+        }
+
+
+        // ================================================
+        // BITRATE
+        // ================================================
+
+        const now =
+            performance.now();
+
+
+        let uploadBitrate = 0;
+        let downloadBitrate = 0;
+
+
+        if (previousTimestamp !== 0) {
+
+            const seconds =
+                (
+                    now -
+                    previousTimestamp
+                ) / 1000;
+
+
+            uploadBitrate =
+                (
+                    (
+                        bytesSent -
+                        previousBytesSent
+                    ) * 8
+                )
+                / seconds
+                / 1000;
+
+
+            downloadBitrate =
+                (
+                    (
+                        bytesReceived -
+                        previousBytesReceived
+                    ) * 8
+                )
+                / seconds
+                / 1000;
+
+        }
+
+
+        previousBytesSent =
+            bytesSent;
+
+        previousBytesReceived =
+            bytesReceived;
+
+        previousTimestamp =
+            now;
+
+
+        // ================================================
+        // RTT
+        // ================================================
+
+        let rtt = null;
+
+
+        if (
+            selectedPair &&
+            selectedPair.currentRoundTripTime !== undefined
+        ) {
+
+            rtt =
+                selectedPair.currentRoundTripTime
+                * 1000;
+
+        }
+
+
+        // ================================================
+        // OUTPUT
+        // ================================================
+
+        statsInfo.textContent =
+`VIDEO
+
+Upload bitrate:
+${uploadBitrate.toFixed(0)} kbps
+
+Download bitrate:
+${downloadBitrate.toFixed(0)} kbps
+
+
+TRAFFIC
+
+Sent:
+${(bytesSent / 1024 / 1024).toFixed(2)} MB
+
+Received:
+${(bytesReceived / 1024 / 1024).toFixed(2)} MB
+
+
+PACKETS
+
+Sent:
+${packetsSent}
+
+Received:
+${packetsReceived}
+
+Lost:
+${packetsLost}
+
+
+NETWORK
+
+RTT:
+${rtt !== null
+    ? rtt.toFixed(1) + " ms"
+    : "unknown"}
+
+Jitter:
+${(jitter * 1000).toFixed(1)} ms
+`;
+
+    } catch (error) {
+
+        console.error(
+            "WebRTC stats error:",
+            error
+        );
+
+        statsInfo.textContent =
+            `Stats error: ${error.message}`;
+
+    }
+
+}
+
+function setupDataChannel(channel) {
+
+    dataChannel = channel;
+
+
+    log(
+        "DataChannel created:",
+        channel.label
+    );
+
+
+    // --------------------------------------------------------
+    // OPEN
+    // --------------------------------------------------------
+
+    channel.onopen = () => {
+
+        log(
+            "DataChannel opened"
+        );
+
+
+        messageInput.disabled =
+            false;
+
+        sendButton.disabled =
+            false;
+
+
+        chatMessages.textContent =
+            "DataChannel connected\n";
+
+    };
+
+
+    // --------------------------------------------------------
+    // MESSAGE
+    // --------------------------------------------------------
+
+    channel.onmessage = (event) => {
+
+        log(
+            "DataChannel message received"
+        );
+
+
+        chatMessages.textContent +=
+            `Peer: ${event.data}\n`;
+
+    };
+
+
+    // --------------------------------------------------------
+    // CLOSE
+    // --------------------------------------------------------
+
+    channel.onclose = () => {
+
+        log(
+            "DataChannel closed"
+        );
+
+
+        messageInput.disabled =
+            true;
+
+        sendButton.disabled =
+            true;
+
+
+        chatMessages.textContent +=
+            "DataChannel closed\n";
+
+    };
+
+
+    // --------------------------------------------------------
+    // ERROR
+    // --------------------------------------------------------
+
+    channel.onerror = (error) => {
+
+        console.error(
+            "DataChannel error:",
+            error
+        );
+
+
+        log(
+            "DataChannel error"
+        );
+
+    };
+
+}
+
+sendButton.onclick = () => {
+
+    sendChatMessage();
+
+};
+
+
+messageInput.addEventListener(
+    "keydown",
+    (event) => {
+
+        if (event.key === "Enter") {
+
+            sendChatMessage();
+
+        }
+
+    }
+);
+
+
+function sendChatMessage() {
+
+    const message =
+        messageInput.value.trim();
+
+
+    if (!message) {
+        return;
+    }
+
+
+    if (
+        !dataChannel ||
+        dataChannel.readyState !== "open"
+    ) {
+
+        log(
+            "DataChannel is not open"
+        );
+
+        return;
+    }
+
+
+    // Вот здесь сообщение реально
+    // отправляется через WebRTC.
+
+    dataChannel.send(
+        message
+    );
+
+
+    chatMessages.textContent +=
+        `Me: ${message}\n`;
+
+
+    messageInput.value =
+        "";
 
 }
