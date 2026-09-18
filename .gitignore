@@ -1,0 +1,20 @@
+# Python
+__pycache__/
+*.pyc
+
+# Virtual environment
+med-env/
+venv/
+.venv/
+
+# Certificates / private keys
+certs/
+*.pem
+*.key
+
+# macOS
+.DS_Store
+
+# IDE
+.idea/
+.vscode/

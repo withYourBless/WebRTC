@@ -1,0 +1,85 @@
+<!DOCTYPE html>
+<html lang="ru">
+
+<head>
+    <meta charset="UTF-8">
+    <title>WebRTC + Python</title>
+</head>
+
+<body>
+
+    <h1>WebRTC Video Processing</h1>
+
+    <button id="connect">
+        Connect
+    </button>
+
+    <button id="disconnect" disabled>
+        Disconnect
+    </button>
+
+    <p>
+        Status:
+        <span id="status">
+            disconnected
+        </span>
+    </p>
+
+    <h3>ICE connection</h3>
+    <pre id="iceInfo">
+    Waiting for connection...
+    </pre>
+
+    <h3>WebRTC statistics</h3>
+    <pre id="statsInfo">
+    Waiting for connection...
+    </pre>
+
+    <p>
+        Video effect:
+
+        <select id="effect" disabled>
+
+            <option value="original">
+                Original
+            </option>
+
+            <option value="grayscale">
+                Grayscale
+            </option>
+
+            <option value="invert">
+                Invert
+            </option>
+
+            <option value="mirror">
+                Mirror
+            </option>
+
+        </select>
+    </p>
+
+    <h2>Original</h2>
+
+    <video
+        id="localVideo"
+        autoplay
+        playsinline
+        muted
+        width="640"
+    ></video>
+
+    <h2>Processed by Python</h2>
+
+    <video
+        id="remoteVideo"
+        autoplay
+        playsinline
+        width="640"
+    ></video>
+
+    <script src="/static/client.js"></script>
+
+</body>
+
+</html>
