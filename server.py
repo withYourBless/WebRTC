@@ -1,4 +1,5 @@
 import json
+import ssl
 import uuid
 
 from aiohttp import web
@@ -406,8 +407,18 @@ app.router.add_static(
 
 if __name__ == "__main__":
 
+    ssl_context = ssl.SSLContext(
+        ssl.PROTOCOL_TLS_SERVER
+    )
+
+    ssl_context.load_cert_chain(
+        "certs_2/tarasenko.webrtc.lab.pem",
+        "certs_2/tarasenko.webrtc.lab-key.pem"
+    )
+
     web.run_app(
         app,
-        host="127.0.0.1",
-        port=8080
+        host="10.8.0.7",
+        port=8080,
+        ssl_context=ssl_context
     )
