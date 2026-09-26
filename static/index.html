@@ -1,85 +1,174 @@
 <!DOCTYPE html>
-<html lang="ru">
-
+<html lang="en">
 <head>
     <meta charset="UTF-8">
-    <title>WebRTC + Python</title>
+    <meta
+        name="viewport"
+        content="width=device-width, initial-scale=1.0"
+    >
+
+    <title>WebRTC Room</title>
+
+    <style>
+        body {
+            font-family: sans-serif;
+            max-width: 1000px;
+            margin: 30px auto;
+            padding: 0 20px;
+        }
+
+        .controls {
+            display: flex;
+            gap: 10px;
+            margin-bottom: 20px;
+        }
+
+        input,
+        button {
+            padding: 10px;
+            font-size: 16px;
+        }
+
+        .videos {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 20px;
+        }
+
+        video {
+            width: 100%;
+            background: black;
+            border-radius: 8px;
+        }
+
+        pre {
+            background: #eee;
+            padding: 15px;
+            overflow-x: auto;
+        }
+
+        @media (max-width: 700px) {
+            .videos {
+                grid-template-columns: 1fr;
+            }
+        }
+    </style>
 </head>
 
 <body>
 
-    <h1>WebRTC Video Processing</h1>
+<h1>WebRTC Room</h1>
 
-    <button id="connect">
-        Connect
+<div class="controls">
+
+    <input
+        id="roomInput"
+        value="test-room"
+        placeholder="Room name"
+    >
+
+    <button id="joinButton">
+        Join room
     </button>
 
-    <button id="disconnect" disabled>
-        Disconnect
+    <button
+        id="leaveButton"
+        disabled
+    >
+        Leave
     </button>
 
-    <p>
-        Status:
-        <span id="status">
-            disconnected
-        </span>
-    </p>
+    <button
+        id="muteButton"
+        disabled
+    >
+        Mute
+    </button>
 
-    <h3>ICE connection</h3>
-    <pre id="iceInfo">
-    Waiting for connection...
-    </pre>
+    <button
+        id="cameraButton"
+        disabled
+    >
+        Camera Off
+    </button>
 
-    <h3>WebRTC statistics</h3>
-    <pre id="statsInfo">
-    Waiting for connection...
-    </pre>
+    <button
+        id="shareScreenButton"
+        disabled
+    >
+        Share Screen
+    </button>
 
-    <p>
-        Video effect:
+</div>
 
-        <select id="effect" disabled>
 
-            <option value="original">
-                Original
-            </option>
+<p>
+    Status:
+    <strong id="status">
+        disconnected
+    </strong>
+</p>
 
-            <option value="grayscale">
-                Grayscale
-            </option>
 
-            <option value="invert">
-                Invert
-            </option>
+<div class="videos">
 
-            <option value="mirror">
-                Mirror
-            </option>
+    <div>
+        <h3>Local video</h3>
 
-        </select>
-    </p>
+        <video
+            id="localVideo"
+            autoplay
+            playsinline
+            muted
+        ></video>
+    </div>
 
-    <h2>Original</h2>
 
-    <video
-        id="localVideo"
-        autoplay
-        playsinline
-        muted
-        width="640"
-    ></video>
+    <div>
+        <h3>Remote video</h3>
 
-    <h2>Processed by Python</h2>
+        <video
+            id="remoteVideo"
+            autoplay
+            playsinline
+        ></video>
+    </div>
 
-    <video
-        id="remoteVideo"
-        autoplay
-        playsinline
-        width="640"
-    ></video>
+</div>
 
-    <script src="/static/client.js"></script>
+<h3>WebRTC Chat</h3>
+
+<div class="controls">
+
+    <input
+        id="messageInput"
+        placeholder="Message"
+        disabled
+    >
+
+    <button
+        id="sendButton"
+        disabled
+    >
+        Send
+    </button>
+
+</div>
+
+<pre id="chatMessages">Waiting for DataChannel...</pre>
+
+<h3>Debug</h3>
+
+<pre id="debug"></pre>
+
+<h3>ICE connection</h3>
+<pre id="iceInfo">Waiting for connection...</pre>
+
+<h3>WebRTC statistics</h3>
+<pre id="statsInfo">Waiting for connection...</pre>
+
+
+<script src="/static/client.js?v=audio-v1"></script>
 
 </body>
-
 </html>

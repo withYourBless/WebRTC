@@ -1,20 +1,29 @@
-import asyncio
 import json
 import ssl
 import uuid
 
-import numpy as np
-
 from aiohttp import web
-from av import VideoFrame
-from aiortc import (
-    RTCPeerConnection,
-    RTCSessionDescription,
-    VideoStreamTrack,
-)
 
-peers = {}
 
+# ============================================================
+# ROOMS
+# ============================================================
+
+# Структура:
+#
+# rooms = {
+#     "room-name": {
+#         "peer-id-1": websocket,
+#         "peer-id-2": websocket
+#     }
+# }
+
+rooms = {}
+
+
+# ============================================================
+# INDEX
+# ============================================================
 
 async def index(request):
     return web.FileResponse(
@@ -22,559 +31,394 @@ async def index(request):
     )
 
 
-# =========================================================
-# VIDEO TRANSFORM
-# =========================================================
+# ============================================================
+# SEND MESSAGE TO PEER
+# ============================================================
 
-class VideoTransformTrack(
-    VideoStreamTrack
+async def send_to_peer(
+    room_id,
+    peer_id,
+    message
 ):
+    """
+    Отправляет signaling message
+    конкретному peer внутри комнаты.
+    """
 
-    def __init__(self, track):
+    room = rooms.get(room_id)
 
-        super().__init__()
-
-        self.track = track
-
-        self.effect = "original"
-
-        self.frame_number = 0
-
-    def set_effect(
-            self,
-            effect
-    ):
-
-        self.effect = effect
-
-    async def recv(self):
-
-        frame = await self.track.recv()
-
-        self.frame_number += 1
-
-        image = frame.to_ndarray(
-            format="bgr24"
-        )
-
-        # -------------------------------------------------
-        # ORIGINAL
-        # -------------------------------------------------
-
-        if self.effect == "original":
-            processed = image
+    if room is None:
+        return
 
 
-        # -------------------------------------------------
-        # GRAYSCALE
-        # -------------------------------------------------
+    ws = room.get(peer_id)
 
-        elif self.effect == "grayscale":
-
-            gray = (
-
-                    0.114
-                    * image[:, :, 0]
-
-                    + 0.587
-                    * image[:, :, 1]
-
-                    + 0.299
-                    * image[:, :, 2]
-            )
-
-            gray = np.clip(
-                gray,
-                0,
-                255
-            ).astype(
-                np.uint8
-            )
-
-            processed = np.stack(
-                [
-                    gray,
-                    gray,
-                    gray
-                ],
-                axis=2
-            )
+    if ws is None:
+        return
 
 
-        # -------------------------------------------------
-        # INVERT
-        # -------------------------------------------------
-
-        elif self.effect == "invert":
-
-            processed = 255 - image
+    await ws.send_json(message)
 
 
-        # -------------------------------------------------
-        # MIRROR
-        # -------------------------------------------------
+# ============================================================
+# WEBSOCKET
+# ============================================================
 
-        elif self.effect == "mirror":
+async def websocket_handler(request):
 
-            processed = np.ascontiguousarray(
-                image[:, ::-1]
-            )
+    ws = web.WebSocketResponse()
 
-
-        # -------------------------------------------------
-        # FALLBACK
-        # -------------------------------------------------
-
-        else:
-
-            processed = image
-
-        new_frame = VideoFrame.from_ndarray(
-            processed,
-            format="bgr24"
-        )
-
-        new_frame.pts = frame.pts
-
-        new_frame.time_base = frame.time_base
-
-        if (
-                self.frame_number % 60
-                == 0
-        ):
-            print(
-                f"Frame "
-                f"{self.frame_number}, "
-                f"effect="
-                f"{self.effect}"
-            )
-
-        return new_frame
+    await ws.prepare(request)
 
 
-# =========================================================
-# OFFER
-# =========================================================
+    # Каждое WebSocket-соединение получает
+    # собственный peer_id.
 
-async def offer(request):
-    data = await request.json()
+    peer_id = str(uuid.uuid4())
 
-    peer_id = str(
-        uuid.uuid4()
-    )
+    room_id = None
 
-    print()
+
     print(
-        f"[{peer_id}] "
-        f"Новый peer"
+        f"\n[{peer_id}] WebSocket connected"
     )
 
-    pc = RTCPeerConnection()
 
-    peers[peer_id] = {
+    try:
 
-        "pc":
-            pc,
+        # ----------------------------------------------------
+        # RECEIVE MESSAGES
+        # ----------------------------------------------------
 
-        "video_track":
-            None,
+        async for msg in ws:
 
-        "data_channel":
-            None
-    }
+            if msg.type != web.WSMsgType.TEXT:
+                continue
 
-    # -----------------------------------------------------
-    # CONNECTION STATE
-    # -----------------------------------------------------
-
-    @pc.on(
-        "connectionstatechange"
-    )
-    async def on_connectionstatechange():
-
-        print(
-            f"[{peer_id}] "
-            f"Connection: "
-            f"{pc.connectionState}"
-        )
-
-        if (
-                pc.connectionState
-                == "failed"
-        ):
-            await close_peer(
-                peer_id
-            )
-
-    # -----------------------------------------------------
-    # VIDEO TRACK
-    # -----------------------------------------------------
-
-    @pc.on("track")
-    def on_track(track):
-
-        print(
-            f"[{peer_id}] "
-            f"Track: "
-            f"{track.kind}"
-        )
-
-        if (
-                track.kind
-                == "video"
-        ):
-            transformed_track = (
-                VideoTransformTrack(
-                    track
-                )
-            )
-
-            peers[
-                peer_id
-            ][
-                "video_track"
-            ] = (
-                transformed_track
-            )
-
-            pc.addTrack(
-                transformed_track
-            )
-
-    # -----------------------------------------------------
-    # DATA CHANNEL
-    # -----------------------------------------------------
-
-    @pc.on("datachannel")
-    def on_datachannel(channel):
-
-        print(
-            f"[{peer_id}] "
-            f"DataChannel: "
-            f"{channel.label}"
-        )
-
-        peers[
-            peer_id
-        ][
-            "data_channel"
-        ] = channel
-
-        # ---------------------------------------------
-        # CHANNEL OPEN
-        # ---------------------------------------------
-
-        @channel.on("open")
-        def on_open():
-
-            print(
-                f"[{peer_id}] "
-                f"DataChannel opened"
-            )
-
-        # ---------------------------------------------
-        # MESSAGE
-        # ---------------------------------------------
-
-        @channel.on("message")
-        def on_message(message):
-
-            print(
-                f"[{peer_id}] "
-                f"Message: "
-                f"{message}"
-            )
 
             try:
 
                 data = json.loads(
-                    message
+                    msg.data
                 )
 
-
-            except (
-                    json.JSONDecodeError,
-                    TypeError
-            ):
+            except json.JSONDecodeError:
 
                 print(
-                    f"[{peer_id}] "
-                    f"Invalid JSON"
+                    f"[{peer_id}] Invalid JSON"
                 )
 
-                return
+                continue
+
 
             message_type = data.get(
                 "type"
             )
 
-            # -----------------------------------------
-            # EFFECT COMMAND
-            # -----------------------------------------
 
-            if (
-                    message_type
-                    == "effect"
-            ):
+            # =================================================
+            # JOIN ROOM
+            # =================================================
 
-                effect = data.get(
-                    "value"
+            if message_type == "join":
+
+                room_id = data.get(
+                    "room"
                 )
 
-                allowed_effects = {
-                    "original",
-                    "grayscale",
-                    "invert",
-                    "mirror"
-                }
 
-                if (
-                        effect
-                        not in
-                        allowed_effects
-                ):
-                    channel.send(
-                        json.dumps({
+                if not room_id:
+
+                    await ws.send_json({
+                        "type": "error",
+                        "message": "room is required"
+                    })
+
+                    continue
+
+
+                # Создаём комнату,
+                # если её ещё нет.
+
+                room = rooms.setdefault(
+                    room_id,
+                    {}
+                )
+
+
+                # Пока разрешаем максимум
+                # двух участников.
+
+                if len(room) >= 2:
+
+                    await ws.send_json({
+                        "type": "error",
+                        "message": "room is full"
+                    })
+
+                    room_id = None
+
+                    continue
+
+
+                # Какие peers уже были
+                # в комнате ДО нас?
+
+                existing_peers = list(
+                    room.keys()
+                )
+
+
+                # Добавляем себя.
+
+                room[peer_id] = ws
+
+
+                print(
+                    f"[{peer_id}] joined room "
+                    f"{room_id}"
+                )
+
+
+                # Сообщаем новому участнику,
+                # кто уже находится в комнате.
+
+                await ws.send_json({
+
+                    "type":
+                        "joined",
+
+                    "peer_id":
+                        peer_id,
+
+                    "peers":
+                        existing_peers
+                })
+
+
+                # Сообщаем старым участникам,
+                # что появился новый peer.
+
+                for existing_peer_id in existing_peers:
+
+                    await send_to_peer(
+                        room_id,
+                        existing_peer_id,
+                        {
                             "type":
-                                "error",
+                                "peer-joined",
 
-                            "message":
-                                "unknown effect"
-                        })
+                            "peer_id":
+                                peer_id
+                        }
                     )
 
-                    return
 
-                video_track = (
-                    peers[
-                        peer_id
-                    ][
-                        "video_track"
-                    ]
+            # =================================================
+            # OFFER
+            # =================================================
+
+            elif message_type == "offer":
+
+                target = data.get(
+                    "target"
                 )
 
-                if (
-                        video_track
-                        is None
-                ):
-                    channel.send(
-                        json.dumps({
-                            "type":
-                                "error",
-
-                            "message":
-                                "video track not found"
-                        })
-                    )
-
-                    return
-
-                # Меняем состояние
-                video_track.set_effect(
-                    effect
-                )
 
                 print(
                     f"[{peer_id}] "
-                    f"Effect changed: "
-                    f"{effect}"
+                    f"offer -> {target}"
                 )
 
-                # Отправляем подтверждение
-                # обратно браузеру
-                channel.send(
-                    json.dumps({
 
+                await send_to_peer(
+                    room_id,
+                    target,
+                    {
                         "type":
-                            "effect_changed",
+                            "offer",
 
-                        "value":
-                            effect
-                    })
+                        "from":
+                            peer_id,
+
+                        "sdp":
+                            data.get("sdp")
+                    }
                 )
 
-    # -----------------------------------------------------
-    # SDP OFFER
-    # -----------------------------------------------------
 
-    remote_description = (
-        RTCSessionDescription(
+            # =================================================
+            # ANSWER
+            # =================================================
 
-            sdp=
-            data["sdp"],
+            elif message_type == "answer":
 
-            type=
-            data["type"]
-        )
-    )
-
-    await pc.setRemoteDescription(
-        remote_description
-    )
-
-    # -----------------------------------------------------
-    # SDP ANSWER
-    # -----------------------------------------------------
-
-    answer = await pc.createAnswer()
-
-    await pc.setLocalDescription(
-        answer
-    )
-
-    print(
-        f"[{peer_id}] "
-        f"SDP answer created"
-    )
-
-    return web.json_response({
-
-        "peer_id":
-            peer_id,
-
-        "sdp":
-            pc.localDescription.sdp,
-
-        "type":
-            pc.localDescription.type
-    })
+                target = data.get(
+                    "target"
+                )
 
 
-# =========================================================
-# CLOSE PEER
-# =========================================================
-
-async def close_peer(
-        peer_id
-):
-    peer = peers.pop(
-        peer_id,
-        None
-    )
-
-    if peer is None:
-        return False
-
-    print(
-        f"[{peer_id}] "
-        f"Closing peer"
-    )
-
-    pc = peer["pc"]
-
-    await pc.close()
-
-    print(
-        f"[{peer_id}] "
-        f"Peer closed"
-    )
-
-    return True
+                print(
+                    f"[{peer_id}] "
+                    f"answer -> {target}"
+                )
 
 
-# =========================================================
-# DISCONNECT
-# =========================================================
+                await send_to_peer(
+                    room_id,
+                    target,
+                    {
+                        "type":
+                            "answer",
 
-async def disconnect(
-        request
-):
-    peer_id = request.match_info[
-        "peer_id"
-    ]
+                        "from":
+                            peer_id,
 
-    closed = await close_peer(
-        peer_id
-    )
+                        "sdp":
+                            data.get("sdp")
+                    }
+                )
 
-    if not closed:
-        return web.json_response(
-            {
-                "error":
-                    "peer not found"
-            },
-            status=404
+
+            # =================================================
+            # ICE CANDIDATE
+            # =================================================
+
+            elif message_type == "ice-candidate":
+
+                target = data.get(
+                    "target"
+                )
+
+
+                await send_to_peer(
+                    room_id,
+                    target,
+                    {
+                        "type":
+                            "ice-candidate",
+
+                        "from":
+                            peer_id,
+
+                        "candidate":
+                            data.get(
+                                "candidate"
+                            )
+                    }
+                )
+
+
+    finally:
+
+        # =====================================================
+        # DISCONNECT
+        # =====================================================
+
+        print(
+            f"[{peer_id}] WebSocket disconnected"
         )
 
-    return web.json_response({
-        "status":
-            "closed"
-    })
 
+        if room_id:
 
-# =========================================================
-# SHUTDOWN
-# =========================================================
-
-async def on_shutdown(app):
-    print(
-        "\nClosing connections..."
-    )
-
-    peer_ids = list(
-        peers.keys()
-    )
-
-    await asyncio.gather(
-        *[
-            close_peer(
-                peer_id
+            room = rooms.get(
+                room_id
             )
-            for peer_id
-            in peer_ids
-        ],
-        return_exceptions=True
-    )
 
 
-# =========================================================
+            if room:
+
+                # Удаляем peer.
+
+                room.pop(
+                    peer_id,
+                    None
+                )
+
+
+                # Сообщаем оставшемуся peer,
+                # что участник ушёл.
+
+                for other_peer_id in list(
+                    room.keys()
+                ):
+
+                    await send_to_peer(
+                        room_id,
+                        other_peer_id,
+                        {
+                            "type":
+                                "peer-left",
+
+                            "peer_id":
+                                peer_id
+                        }
+                    )
+
+
+                # Если комната пустая —
+                # удаляем её полностью.
+
+                if not room:
+
+                    rooms.pop(
+                        room_id,
+                        None
+                    )
+
+
+                    print(
+                        f"Room {room_id} deleted"
+                    )
+
+
+    return ws
+
+
+# ============================================================
 # APP
-# =========================================================
+# ============================================================
 
 app = web.Application()
+
 
 app.router.add_get(
     "/",
     index
 )
 
-app.router.add_post(
-    "/offer",
-    offer
+
+app.router.add_get(
+    "/ws",
+    websocket_handler
 )
 
-app.router.add_post(
-    "/peers/{peer_id}/close",
-    disconnect
-)
 
 app.router.add_static(
     "/static/",
     path="static"
 )
 
-app.on_shutdown.append(
-    on_shutdown
-)
 
-# =========================================================
+# ============================================================
 # START
-# =========================================================
+# ============================================================
 
 if __name__ == "__main__":
 
-    # ssl_context = ssl.SSLContext(
-    #     ssl.PROTOCOL_TLS_SERVER
-    # )
-    #
-    # ssl_context.load_cert_chain(
-    #     "certs/cert.pem",
-    #     "certs/key.pem"
-    # )
+    ssl_context = ssl.SSLContext(
+        ssl.PROTOCOL_TLS_SERVER
+    )
+
+    ssl_context.load_cert_chain(
+        "certs_2/tarasenko.webrtc.lab.pem",
+        "certs_2/tarasenko.webrtc.lab-key.pem"
+    )
 
     web.run_app(
         app,
-        host="127.0.0.1",
+        host="10.8.0.7",
         port=8080,
-        # ssl_context=ssl_context
+        ssl_context=ssl_context
     )
