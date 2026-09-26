@@ -1,3 +1,5 @@
+const shareScreenButton =
+    document.getElementById("shareScreenButton");
 const muteButton =
     document.getElementById("muteButton");
 const cameraButton =
@@ -39,6 +41,8 @@ let previousBytesReceived = 0;
 let previousTimestamp = 0;
 let isMuted = false;
 let isCameraOff = false;
+let screenStream = null;
+let isScreenSharing = false;
 // ICE candidates могут прийти раньше,
 // чем мы установим remoteDescription.
 //
@@ -430,10 +434,10 @@ async () => {
                     video: true,
                     audio: true
                 });
-        localVideo.srcObject =
-            localStream;
+        localVideo.srcObject = localStream;
         muteButton.disabled = false;
         cameraButton.disabled = false;
+        shareScreenButton.disabled = false;
 
         log("Camera started");
         // ----------------------------------------------------
@@ -528,6 +532,20 @@ async function leaveRoom() {
         dataChannel.close();
         dataChannel = null;
     }
+
+    if (screenStream) {
+        for (
+            const track
+            of screenStream.getTracks()
+        ) {
+            track.stop();
+        }
+        screenStream = null;
+    }
+    isScreenSharing = false;
+    shareScreenButton.disabled = true;
+    shareScreenButton.textContent = "Share Screen";
+
     if (pc) {
         pc.close();
         pc = null;
@@ -914,4 +932,114 @@ cameraButton.onclick = () => {
             ? "OFF"
             : "ON"
     );
+};
+
+async function startScreenShare() {
+    if (!pc) {
+        log("RTCPeerConnection not found");
+        return;
+    }
+    try {
+        // Просим macOS / браузер дать экран.
+        screenStream =
+            await navigator.mediaDevices.getDisplayMedia({
+                video: true,
+                audio: false
+            });
+        const screenTrack = screenStream.getVideoTracks()[0];
+        if (!screenTrack) {
+            log("Screen video track not found");
+            return;
+        }
+        // Ищем sender, который сейчас отправляет камеру.
+        const videoSender =
+            pc.getSenders().find(
+                sender =>
+                    sender.track?.kind === "video"
+            );
+        if (!videoSender) {
+            log("Video sender not found");
+            return;
+        }
+        // Главное место.
+        //
+        // Не создаём новый RTCPeerConnection.
+        // Не делаем новый offer.
+        // Просто заменяем источник видео.
+        await videoSender.replaceTrack(
+            screenTrack
+        );
+        // Локально тоже показываем экран.
+        localVideo.srcObject = screenStream;
+        isScreenSharing = true;
+        shareScreenButton.textContent = "Stop Sharing";
+        cameraButton.disabled = true;
+        log("Screen sharing started");
+        // Если пользователь нажмёт системную кнопку
+        // "Stop Sharing" в Safari/Chrome/macOS,
+        // track завершится сам.
+        screenTrack.onended = async () => {
+            log("Screen track ended");
+            await stopScreenShare();
+        };
+    } catch (error) {
+        console.error(
+            "Screen sharing error:",
+            error
+        );
+        log(
+            "Screen sharing error:",
+            error.name,
+            error.message
+        );
+    }
+}
+
+async function stopScreenShare() {
+    if (!isScreenSharing) {
+        return;
+    }
+    const cameraTrack =
+        localStream
+            ?.getVideoTracks()[0];
+    const videoSender =
+        pc
+            ?.getSenders()
+            .find(
+                sender =>
+                    sender.track?.kind === "video"
+            );
+    if (
+        cameraTrack &&
+        videoSender
+    ) {
+        await videoSender.replaceTrack(
+            cameraTrack
+        );
+    }
+    // Останавливаем capture экрана.
+    if (screenStream) {
+        for (
+            const track
+            of screenStream.getTracks()
+        ) {
+            track.stop();
+        }
+    }
+    screenStream = null;
+    isScreenSharing = false;
+    // Возвращаем preview камеры.
+    localVideo.srcObject = localStream;
+    shareScreenButton.textContent = "Share Screen";
+    cameraButton.disabled = false;
+    log("Camera restored");
+}
+
+shareScreenButton.onclick =
+async () => {
+    if (isScreenSharing) {
+        await stopScreenShare();
+    } else {
+        await startScreenShare();
+    }
 };
